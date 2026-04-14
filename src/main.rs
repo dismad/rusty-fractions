@@ -1,7 +1,8 @@
 use eframe::egui;
 use image;
-use num_bigint::BigInt;
+use num_bigint::{BigInt, Sign};
 use num_rational::BigRational;
+use num_traits::Zero;
 use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
@@ -9,8 +10,16 @@ use std::sync::mpsc;
 use std::thread;
 use tempfile::NamedTempFile;
 
+#[derive(Clone, Copy, PartialEq, Default)]
+enum CurrentTab {
+    #[default]
+    Evaluator,
+    ContinuedFractions,
+}
+
 #[derive(Default)]
 struct App {
+    // === Original evaluator fields ===
     input: String,
     result_text: String,
     status: String,
@@ -23,11 +32,24 @@ struct App {
     final_png_bytes: Option<Vec<u8>>,
     steps_png_bytes: Option<Vec<u8>>,
     rx: Option<mpsc::Receiver<Result<(String, String, String, Vec<u8>, Option<Vec<String>>, Option<Vec<u8>>, Option<String>), String>>>,
+
+    // === New tab system ===
+    current_tab: CurrentTab,
+
+    // === Continued Fractions fields ===
+    cf_value_input: String,
+    cf_coeffs_input: String,
+    cf_partial_quotients: Vec<BigInt>,
+    cf_convergents: Vec<(BigInt, BigInt)>,
+    cf_result_text: String,
+    cf_status: String,
+    cf_texture: Option<egui::TextureHandle>,
+    cf_final_png_bytes: Option<Vec<u8>>,
 }
 
 fn main() -> eframe::Result<()> {
     let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default().with_inner_size([1100.0, 850.0]),
+        viewport: egui::ViewportBuilder::default().with_inner_size([2560.0, 1600.0]),
         ..Default::default()
     };
     eframe::run_native(
@@ -44,128 +66,65 @@ impl eframe::App for App {
         }
 
         egui::CentralPanel::default().show(ctx, |ui| {
-            ui.heading("rusty_fractions");
-            ui.add_space(20.0);
-
-            ui.label("Expression:");
-            ui.add_sized(
-                [ui.available_width(), 90.0],
-                egui::TextEdit::singleline(&mut self.input)
-                    .font(egui::FontId::new(48.0, egui::FontFamily::Proportional)),
-            );
             ui.add_space(10.0);
 
-            ui.horizontal(|ui| {
+                        ui.horizontal(|ui| {
+                let tab_width = 320.0;   // ← adjust tab width here
+                let tab_height = 55.0;   // ← adjust tab height here
+
+                // Selected tab style
+                let selected_bg = egui::Color32::from_rgb(93, 83, 47);
+                let selected_border = egui::Stroke::new(4.0, egui::Color32::from_rgb(224, 181, 26));
+
+                // Unselected tab style
+                let unselected_bg = egui::Color32::from_rgb(45, 45, 55);
+                let unselected_border = egui::Stroke::new(2.0, egui::Color32::from_rgb(100, 100, 120));
+
+                // Expression Evaluator tab
+                let is_eval = self.current_tab == CurrentTab::Evaluator;
                 if ui
                     .add_sized(
-                        [260.0, 80.0],
-                        egui::Button::new("Convert")
-                            .fill(egui::Color32::from_rgb(0, 180, 0)),
-                    )
-                    .clicked()
-                    && !self.processing
-                {
-                    self.start_conversion(ctx);
-                }
-
-                if ui
-                    .add_sized(
-                        [260.0, 80.0],
-                        egui::Button::new("Clear").fill(egui::Color32::from_rgb(200, 0, 0)),
-                    )
-                    .clicked()
-                {
-                    self.clear();
-                }
-
-                if self.preview_texture.is_some() {
-                    if ui
-                        .add_sized(
-                            [260.0, 80.0],
-                            egui::Button::new("Save Renders")
-                                .fill(egui::Color32::from_rgb(0, 100, 200)),
+                        [tab_width, tab_height],
+                        egui::Button::new(
+                            egui::RichText::new("Expression Evaluator")
+                                .font(egui::FontId::new(40.0, egui::FontFamily::Proportional))
+                                .strong()
+                                .color(egui::Color32::WHITE),
                         )
-                        .clicked()
-                    {
-                        self.save_rendered_images();
-                    }
+                        .fill(if is_eval { selected_bg } else { unselected_bg })
+                        .stroke(if is_eval { selected_border } else { unselected_border }),
+                    )
+                    .clicked()
+                {
+                    self.current_tab = CurrentTab::Evaluator;
+                }
+
+                // Continued Fractions tab
+                let is_cf = self.current_tab == CurrentTab::ContinuedFractions;
+                if ui
+                    .add_sized(
+                        [tab_width, tab_height],
+                        egui::Button::new(
+                            egui::RichText::new("Continued Fractions")
+                                .font(egui::FontId::new(40.0, egui::FontFamily::Proportional))
+                                .strong()
+                                .color(egui::Color32::WHITE),
+                        )
+                        .fill(if is_cf { selected_bg } else { unselected_bg })
+                        .stroke(if is_cf { selected_border } else { unselected_border }),
+                    )
+                    .clicked()
+                {
+                    self.current_tab = CurrentTab::ContinuedFractions;
                 }
             });
 
-            ui.checkbox(&mut self.show_steps, "Show step-by-step calculation");
             ui.separator();
 
-            ui.horizontal(|ui| {
-                ui.label("Result:");
-                if self.processing {
-                    ui.add(egui::widgets::Spinner::new());
-                }
-            });
-
-            if !self.result_text.is_empty() {
-                ui.monospace(&self.result_text);
+            match self.current_tab {
+                CurrentTab::Evaluator => self.ui_evaluator_tab(ctx, ui),
+                CurrentTab::ContinuedFractions => self.ui_continued_fractions_tab(ctx, ui),
             }
-            if !self.status.is_empty() {
-                if self.status.starts_with("Error:") {
-                    ui.colored_label(
-                        egui::Color32::YELLOW,
-                        egui::RichText::new(&self.status).strong(),
-                    );
-                } else {
-                    ui.label(&self.status);
-                }
-            }
-            if let Some(w) = &self.warning {
-                ui.colored_label(egui::Color32::YELLOW, egui::RichText::new(w).strong());
-            }
-
-            if !self.steps.is_empty() {
-                ui.separator();
-                ui.label("Step-by-step solution (text):");
-                egui::ScrollArea::vertical()
-                    .max_height(280.0)
-                    .id_salt("steps_text_scroll")
-                    .auto_shrink([false, true])
-                    .show(ui, |ui| {
-                        for step in &self.steps {
-                            ui.label(egui::RichText::new(step).monospace());
-                        }
-                    });
-            }
-
-            if self.steps_preview_texture.is_some() || (self.show_steps && !self.steps.is_empty()) {
-                ui.separator();
-                ui.label("Rendered Step-by-Step:");
-                egui::ScrollArea::vertical()
-                    .max_height(520.0)
-                    .id_salt("rendered_steps_scroll")
-                    .auto_shrink([false, true])
-                    .show(ui, |ui| {
-                        if let Some(texture) = &self.steps_preview_texture {
-                            ui.centered_and_justified(|ui| {
-                                ui.image((texture.id(), texture.size_vec2()));
-                            });
-                        } else if self.show_steps {
-                            ui.centered_and_justified(|ui| {
-                                ui.label("(Rendered steps will appear here)");
-                            });
-                        }
-                    });
-            }
-
-            ui.separator();
-            ui.label("Final Rendered Math Preview:");
-            egui::ScrollArea::both().show(ui, |ui| {
-                if let Some(texture) = &self.preview_texture {
-                    ui.centered_and_justified(|ui| {
-                        ui.image((texture.id(), texture.size_vec2()));
-                    });
-                } else {
-                    ui.centered_and_justified(|ui| {
-                        ui.label("(Preview appears here after conversion)");
-                    });
-                }
-            });
         });
 
         if let Some(rx) = &self.rx {
@@ -177,14 +136,12 @@ impl eframe::App for App {
                         let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
                         let _ = fs::write(cwd.join("math_output.md"), md);
                         let _ = fs::write(cwd.join("math_output.tex"), tex);
-
                         self.result_text = format!("Exact answer: {}", answer);
                         self.status = "Done".to_string();
                         self.steps = opt_steps.unwrap_or_default();
                         self.warning = warning_opt;
                         self.final_png_bytes = Some(png_bytes.clone());
                         self.steps_png_bytes = opt_steps_png.clone();
-
                         if let Ok(image) = image::load_from_memory(&png_bytes) {
                             let size = [image.width() as usize, image.height() as usize];
                             let rgba = image.to_rgba8();
@@ -216,6 +173,453 @@ impl eframe::App for App {
 }
 
 impl App {
+    fn ui_evaluator_tab(&mut self, ctx: &egui::Context, ui: &mut egui::Ui) {
+        ui.label(
+            egui::RichText::new("Simplify Fractions.")
+                .font(egui::FontId::new(22.0, egui::FontFamily::Proportional))
+                .color(egui::Color32::from_rgb(180, 180, 180)),
+        );
+        ui.add_space(10.0);
+
+        ui.group(|ui| {
+            ui.label(
+                egui::RichText::new("Enter Fraction Expression:")
+                    .font(egui::FontId::new(12.0, egui::FontFamily::Proportional)),
+            );
+            ui.add_sized(
+                [ui.available_width(), 90.0],
+                egui::TextEdit::singleline(&mut self.input)
+                    .font(egui::FontId::new(48.0, egui::FontFamily::Proportional))
+                    .hint_text("e.g. 1/2 + 3(4-5)/6 or 22/7"),
+            );
+        });
+
+        ui.add_space(10.0);
+        ui.horizontal(|ui| {
+            if ui
+                .add_sized(
+                    [260.0, 80.0],
+                    egui::Button::new(
+			   egui::RichText::new("Convert")
+					.strong()
+                    			.color(egui::Color32::WHITE)
+                                        .font(egui::FontId::new(24.0, egui::FontFamily::Proportional))
+			     )
+                        .fill(egui::Color32::from_rgb(0, 180, 0)),
+                )
+                .clicked()
+                && !self.processing
+            {
+                self.start_conversion(ctx);
+            }
+            if ui
+                .add_sized(
+                    [260.0, 80.0],                  
+		    egui::Button::new(
+			    egui::RichText::new("Clear")
+					.strong()
+                    			.color(egui::Color32::WHITE)
+                                        .font(egui::FontId::new(24.0, egui::FontFamily::Proportional))
+			     )
+                            .fill(egui::Color32::from_rgb(200, 0, 0)),
+                )
+                .clicked()
+            {
+                self.clear();
+            }
+            if self.preview_texture.is_some() {
+                if ui
+                    .add_sized(
+                        [260.0, 80.0],
+                        egui::Button::new("Save Renders")
+                            .fill(egui::Color32::from_rgb(0, 100, 200)),
+                    )
+                    .clicked()
+                {
+                    self.save_rendered_images();
+                }
+            }
+        });
+        ui.checkbox(&mut self.show_steps, "Show step-by-step calculation");
+        ui.separator();
+        ui.horizontal(|ui| {
+            ui.label("Result:");
+            if self.processing {
+                ui.add(egui::widgets::Spinner::new());
+            }
+        });
+        if !self.result_text.is_empty() {
+            ui.monospace(&self.result_text);
+        }
+        if !self.status.is_empty() {
+            if self.status.starts_with("Error:") {
+                ui.colored_label(
+                    egui::Color32::YELLOW,
+                    egui::RichText::new(&self.status).strong(),
+                );
+            } else {
+                ui.label(&self.status);
+            }
+        }
+        if let Some(w) = &self.warning {
+            ui.colored_label(egui::Color32::YELLOW, egui::RichText::new(w).strong());
+        }
+        if !self.steps.is_empty() {
+            ui.separator();
+            ui.label("Step-by-step solution (text):");
+            egui::ScrollArea::vertical()
+                .max_height(280.0)
+                .id_salt("steps_text_scroll")
+                .auto_shrink([false, true])
+                .show(ui, |ui| {
+                    for step in &self.steps {
+                        ui.label(egui::RichText::new(step).monospace());
+                    }
+                });
+        }
+        if self.steps_preview_texture.is_some() || (self.show_steps && !self.steps.is_empty()) {
+            ui.separator();
+            ui.label("Rendered Step-by-Step:");
+            egui::ScrollArea::vertical()
+                .max_height(520.0)
+                .id_salt("rendered_steps_scroll")
+                .auto_shrink([false, true])
+                .show(ui, |ui| {
+                    if let Some(texture) = &self.steps_preview_texture {
+                        ui.centered_and_justified(|ui| {
+                            ui.image((texture.id(), texture.size_vec2()));
+                        });
+                    } else if self.show_steps {
+                        ui.centered_and_justified(|ui| {
+                            ui.label("(Rendered steps will appear here)");
+                        });
+                    }
+                });
+        }
+        ui.separator();
+        ui.label("Final Rendered Math Preview:");
+        egui::ScrollArea::both().show(ui, |ui| {
+            if let Some(texture) = &self.preview_texture {
+                ui.centered_and_justified(|ui| {
+                    ui.image((texture.id(), texture.size_vec2()));
+                });
+            } else {
+                ui.centered_and_justified(|ui| {
+                    ui.label("(Preview appears here after conversion)");
+                });
+            }
+        });
+    }
+
+    fn ui_continued_fractions_tab(&mut self, ctx: &egui::Context, ui: &mut egui::Ui) {
+        ui.label(
+            egui::RichText::new("Construct and Deconstruct CF's using Convergents.")
+                .font(egui::FontId::new(22.0, egui::FontFamily::Proportional))
+                .color(egui::Color32::from_rgb(180, 180, 180)),
+        );
+        ui.add_space(10.0);
+
+        ui.group(|ui| {
+            ui.label("Deconstruct (decimal / fraction -> CF + convergents)");
+            ui.add_sized(
+                [ui.available_width(), 90.0],
+                egui::TextEdit::singleline(&mut self.cf_value_input)
+                    .font(egui::FontId::new(48.0, egui::FontFamily::Proportional))
+                    .hint_text("e.g. 3.14159 or 22/7 or 355/113"),
+            );
+            if ui
+                .add_sized(
+                    [260.0, 80.0],
+                    egui::Button::new(
+                        egui::RichText::new("Deconstruct to Continued Fraction")
+				     .strong()
+                    		     .color(egui::Color32::WHITE)
+                                     .font(egui::FontId::new(24.0, egui::FontFamily::Proportional))
+                              )
+                             .fill(egui::Color32::from_rgb(124, 118, 209)),
+                )
+                .clicked()
+            {
+                self.deconstruct_to_cf(ctx);
+            }
+        });
+
+                ui.add_space(15.0);
+        ui.group(|ui| {
+            ui.label("Construct (partial quotients -> value + convergents)");
+            ui.add_sized(
+                [ui.available_width(), 90.0],
+                egui::TextEdit::singleline(&mut self.cf_coeffs_input)
+                    .font(egui::FontId::new(48.0, egui::FontFamily::Proportional))
+                    .hint_text("e.g. 3,7,15,1 or [3;7,15,1]"),
+            );
+            ui.horizontal(|ui| {
+                if ui
+                    .add_sized(
+                        [260.0, 80.0],
+                        egui::Button::new(
+			    egui::RichText::new("Construct from Coefficients")
+					.strong()
+                    			.color(egui::Color32::WHITE)
+                                        .font(egui::FontId::new(24.0, egui::FontFamily::Proportional))
+			     )
+                            .fill(egui::Color32::from_rgb(209, 118, 197)),
+                    )
+                    .clicked()
+                {
+                    self.construct_from_cf(ctx);
+                }
+
+                if ui
+                    .add_sized(
+                        [260.0, 80.0],
+                        egui::Button::new(
+			    egui::RichText::new("Clear CF")
+					.strong()
+                    			.color(egui::Color32::WHITE)
+                                        .font(egui::FontId::new(24.0, egui::FontFamily::Proportional))
+				)
+                            	.fill(egui::Color32::from_rgb(200, 0, 0)),
+                    )
+                    .clicked()
+                {
+                    self.clear_cf();
+                }
+
+                // Blue "Save CF Render" button — only appears when there is something to save
+                if self.cf_texture.is_some() && self.cf_final_png_bytes.is_some() {
+                    if ui
+                        .add_sized(
+                            [260.0, 80.0],
+                            egui::Button::new(
+				egui::RichText::new("Save CF Render")
+					.strong()
+                    			.color(egui::Color32::WHITE)
+                                        .font(egui::FontId::new(24.0, egui::FontFamily::Proportional))
+				)
+                                .fill(egui::Color32::from_rgb(0, 100, 200)),
+                        )
+                        .clicked()
+                    {
+                        self.save_cf_render();
+                    }
+                }
+            });
+        });
+
+        ui.separator();
+
+        if !self.cf_partial_quotients.is_empty() {
+            ui.label("Continued Fraction:");
+            let cf_str = self.cf_to_string();
+            ui.monospace(&cf_str);
+
+            ui.add_space(10.0);
+            ui.label("Convergents (nested continued-fraction form):");
+
+            egui::Frame::none()
+                .fill(egui::Color32::from_rgb(35, 35, 45))
+                .inner_margin(egui::Margin::same(10.0))
+                .show(ui, |ui| {
+                    egui::ScrollArea::vertical()
+                        .max_height(420.0)
+                        .show(ui, |ui| {
+                            egui::Grid::new("convergents_grid")
+                                .num_columns(3)
+                                .striped(true)
+                                .show(ui, |ui| {
+                                    ui.label("n");
+                                    ui.label("Continued Fractions (nested)");
+                                    ui.label("Simplified Approximations");
+                                    ui.end_row();
+
+                                    for (i, (h, k)) in self.cf_convergents.iter().enumerate() {
+                                        ui.label(i.to_string());
+
+                                        let nested = self.convergent_nested_string(i);
+                                        ui.label(
+                                            egui::RichText::new(&nested)
+                                                .font(egui::FontId::new(22.0, egui::FontFamily::Monospace)),
+                                        );
+
+                                        let value = if k.is_zero() {
+                                            "—".to_string()
+                                        } else {
+                                            format!("{}/{}", h, k)
+                                        };
+                                        ui.label(
+                                            egui::RichText::new(value)
+                                                .font(egui::FontId::new(22.0, egui::FontFamily::Monospace))
+                                                .color(egui::Color32::from_rgb(100, 255, 100)),
+                                        );
+                                        ui.end_row();
+                                    }
+                                });
+                        });
+                });
+
+            if !self.cf_result_text.is_empty() {
+                ui.add_space(10.0);
+                ui.label("Final exact value (last convergent):");
+                ui.monospace(&self.cf_result_text);
+            }
+
+                if let Some(texture) = &self.cf_texture {
+                ui.separator();
+                ui.label("Rendered Continued Fraction (nested form):");
+
+                // Scrollable render box — always shows scrollbars
+                egui::ScrollArea::both()
+                    .max_height(520.0)
+                    .max_width(ui.available_width())
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        ui.centered_and_justified(|ui| {
+                            ui.image((texture.id(), texture.size_vec2()));
+                        });
+                    });
+
+            } else if !self.cf_status.is_empty() && self.cf_status.starts_with("Render error:") {
+                ui.colored_label(egui::Color32::YELLOW, egui::RichText::new(&self.cf_status).strong());
+            }
+        }
+
+        if !self.cf_status.is_empty() && !self.cf_status.starts_with("Render error:") {
+            if self.cf_status.starts_with("Error:") {
+                ui.colored_label(egui::Color32::YELLOW, egui::RichText::new(&self.cf_status).strong());
+            } else {
+                ui.label(&self.cf_status);
+            }
+        }
+    }
+
+    fn convergent_nested_string(&self, idx: usize) -> String {
+        if self.cf_partial_quotients.is_empty() || idx >= self.cf_partial_quotients.len() {
+            return "[ ]".to_string();
+        }
+        let mut expr = self.cf_partial_quotients[idx].to_string();
+        for i in (0..idx).rev() {
+            let a = self.cf_partial_quotients[i].to_string();
+            expr = format!("{} + 1/({})", a, expr);
+        }
+        expr
+    }
+
+    fn deconstruct_to_cf(&mut self, ctx: &egui::Context) {
+        self.cf_status.clear();
+        self.cf_partial_quotients.clear();
+        self.cf_convergents.clear();
+        self.cf_result_text.clear();
+        self.cf_texture = None;
+
+        let input = self.cf_value_input.trim();
+        if input.is_empty() {
+            self.cf_status = "Error: Enter a number or fraction".to_string();
+            return;
+        }
+
+        match self.parse_to_rational(input) {
+            Ok(rat) => {
+                let cf = rational_to_continued_fraction(&rat);
+                let convergents = compute_convergents(&cf);
+                self.cf_partial_quotients = cf;
+                self.cf_convergents = convergents;
+                self.cf_result_text = rat.to_string();
+                self.cf_status = "Deconstructed successfully".to_string();
+
+                if let Err(e) = self.try_render_nested_cf(ctx) {
+                    self.cf_status = format!("Render error: {}", e);
+                }
+            }
+            Err(e) => self.cf_status = format!("Error: {}", e),
+        }
+    }
+
+    fn construct_from_cf(&mut self, ctx: &egui::Context) {
+        self.cf_status.clear();
+        self.cf_partial_quotients.clear();
+        self.cf_convergents.clear();
+        self.cf_result_text.clear();
+        self.cf_texture = None;
+
+        let input = self.cf_coeffs_input.trim();
+        if input.is_empty() {
+            self.cf_status = "Error: Enter coefficients".to_string();
+            return;
+        }
+
+        match parse_cf_coeffs(input) {
+            Ok(cf) => {
+                if cf.is_empty() {
+                    self.cf_status = "Error: Empty continued fraction".to_string();
+                    return;
+                }
+                let convergents = compute_convergents(&cf);
+                let value = cf_to_rational(&cf);
+                self.cf_partial_quotients = cf;
+                self.cf_convergents = convergents;
+                self.cf_result_text = value.to_string();
+                self.cf_status = "Constructed successfully".to_string();
+
+                if let Err(e) = self.try_render_nested_cf(ctx) {
+                    self.cf_status = format!("Render error: {}", e);
+                }
+            }
+            Err(e) => self.cf_status = format!("Error: {}", e),
+        }
+    }
+
+    fn try_render_nested_cf(&mut self, ctx: &egui::Context) -> Result<(), String> {
+        let png = render_nested_cf_to_png(&self.cf_partial_quotients)?;
+        self.cf_final_png_bytes = Some(png.clone());
+        if let Ok(image) = image::load_from_memory(&png) {
+            let size = [image.width() as usize, image.height() as usize];
+            let rgba = image.to_rgba8();
+            let pixels = rgba.as_flat_samples().as_slice().to_vec();
+            self.cf_texture = Some(ctx.load_texture(
+                "cf_preview",
+                egui::ColorImage::from_rgba_unmultiplied(size, &pixels),
+                Default::default(),
+            ));
+            Ok(())
+        } else {
+            Err("Failed to load rendered PNG".to_string())
+        }
+    }
+
+    fn parse_to_rational(&self, input: &str) -> Result<BigRational, String> {
+        let cleaned = input
+            .replace(['[', '{'], "(")
+            .replace([']', '}'], ")")
+            .replace(" ", "");
+        let tokens = tokenize(&cleaned)?;
+        let (expr, _) = parse_expr(&tokens, 0)?;
+        evaluate(&expr)
+    }
+
+    fn cf_to_string(&self) -> String {
+        if self.cf_partial_quotients.is_empty() {
+            return String::new();
+        }
+        let mut s = format!("[{}", self.cf_partial_quotients[0]);
+        for a in &self.cf_partial_quotients[1..] {
+            s.push_str(&format!(";{}", a));
+        }
+        s.push(']');
+        s
+    }
+
+    fn clear_cf(&mut self) {
+        self.cf_value_input.clear();
+        self.cf_coeffs_input.clear();
+        self.cf_partial_quotients.clear();
+        self.cf_convergents.clear();
+        self.cf_result_text.clear();
+        self.cf_status.clear();
+        self.cf_texture = None;
+        self.cf_final_png_bytes = None;
+    }
+
     fn start_conversion(&mut self, ctx: &egui::Context) {
         let input = self.input.trim().to_string();
         if input.is_empty() {
@@ -229,16 +633,13 @@ impl App {
         self.warning = None;
         self.final_png_bytes = None;
         self.steps_png_bytes = None;
-
         let show_steps = self.show_steps;
         let (tx, rx) = mpsc::channel();
         self.rx = Some(rx);
-
         thread::spawn(move || {
             let result = process_expression(&input, show_steps);
             let _ = tx.send(result);
         });
-
         ctx.request_repaint();
     }
 
@@ -254,6 +655,7 @@ impl App {
         self.steps_png_bytes = None;
         self.processing = false;
         self.rx = None;
+        self.clear_cf();
     }
 
     fn save_rendered_images(&mut self) {
@@ -277,10 +679,179 @@ impl App {
             self.status = "Nothing to save yet".to_string();
         }
     }
+
+        fn save_cf_render(&mut self) {
+        let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+
+        let mut saved = vec![];
+
+        // 1. Save the rendered image (PNG)
+        if let Some(bytes) = &self.cf_final_png_bytes {
+            let path = cwd.join("cf_render.png");
+            if fs::write(&path, bytes).is_ok() {
+                saved.push("cf_render.png");
+            }
+        }
+
+        // 2. Save the convergents table as text file
+        if !self.cf_partial_quotients.is_empty() {
+            let mut text = String::new();
+            text.push_str(&format!("Continued Fraction: {}\n\n", self.cf_to_string()));
+            text.push_str("Convergents (nested form):\n");
+            text.push_str("n | Nested Continued Fraction                    | Simplified Value\n");
+            text.push_str("------------------------------------------------------------------\n");
+
+            for (i, (h, k)) in self.cf_convergents.iter().enumerate() {
+                let nested = self.convergent_nested_string(i);
+                let value = if k.is_zero() {
+                    "—".to_string()
+                } else {
+                    format!("{}/{}", h, k)
+                };
+                text.push_str(&format!("{:1} | {:45} | {}\n", i, nested, value));
+            }
+
+            let path = cwd.join("cf_convergents.txt");
+            if fs::write(&path, text).is_ok() {
+                saved.push("cf_convergents.txt");
+            }
+        }
+
+        if !saved.is_empty() {
+            self.cf_status = format!("Saved: {}", saved.join(" + "));
+        } else {
+            self.cf_status = "Nothing to save yet".to_string();
+        }
+    }
+}
+
+// ====================== CONTINUED FRACTION HELPERS ======================
+
+fn floor_rational(r: &BigRational) -> BigInt {
+    let n = r.numer();
+    let d = r.denom();
+    let q = n / d;
+    let rem = n % d;
+    if rem.is_zero() {
+        q
+    } else if (n.sign() == Sign::Minus) != (d.sign() == Sign::Minus) {
+        q - BigInt::from(1)
+    } else {
+        q
+    }
+}
+
+fn rational_to_continued_fraction(r: &BigRational) -> Vec<BigInt> {
+    let mut cf = Vec::new();
+    let mut x = r.clone();
+    let max_steps = 200;
+
+    for _ in 0..max_steps {
+        let a = floor_rational(&x);
+        cf.push(a.clone());
+
+        let frac_part = x - BigRational::from_integer(a.clone());
+        if frac_part == BigRational::from_integer(BigInt::from(0)) {
+            break;
+        }
+        x = BigRational::from_integer(BigInt::from(1)) / frac_part;
+    }
+    if cf.is_empty() {
+        cf.push(BigInt::from(0));
+    }
+    cf
+}
+
+fn compute_convergents(cf: &[BigInt]) -> Vec<(BigInt, BigInt)> {
+    if cf.is_empty() {
+        return vec![];
+    }
+    let mut convergents = Vec::new();
+
+    let mut h_prev2 = BigInt::from(0);
+    let mut h_prev1 = BigInt::from(1);
+    let mut k_prev2 = BigInt::from(1);
+    let mut k_prev1 = BigInt::from(0);
+
+    for a in cf {
+        let h = a * &h_prev1 + &h_prev2;
+        let k = a * &k_prev1 + &k_prev2;
+
+        convergents.push((h.clone(), k.clone()));
+
+        h_prev2 = h_prev1;
+        h_prev1 = h;
+        k_prev2 = k_prev1;
+        k_prev1 = k;
+    }
+    convergents
+}
+
+fn cf_to_rational(cf: &[BigInt]) -> BigRational {
+    if cf.is_empty() {
+        return BigRational::from_integer(BigInt::from(0));
+    }
+    let convergents = compute_convergents(cf);
+    let (h, k) = convergents.last().unwrap();
+    BigRational::new(h.clone(), k.clone())
+}
+
+fn parse_cf_coeffs(s: &str) -> Result<Vec<BigInt>, String> {
+    let s = s.trim().replace(['[', ']', '{', '}'], "").replace(';', ",");
+    let parts: Vec<&str> = s.split(',').map(|p| p.trim()).filter(|p| !p.is_empty()).collect();
+    let mut cf = Vec::new();
+    for p in parts {
+        match p.parse::<BigInt>() {
+            Ok(n) => cf.push(n),
+            Err(_) => return Err(format!("Invalid coefficient: {}", p)),
+        }
+    }
+    Ok(cf)
+}
+
+fn render_nested_cf_to_png(cf: &[BigInt]) -> Result<Vec<u8>, String> {
+    if cf.is_empty() {
+        return Err("Empty CF".to_string());
+    }
+
+    let mut expr = cf.last().unwrap().to_string();
+    for a in cf.iter().rev().skip(1) {
+        expr = format!("{} + frac(1, {})", a, expr);
+    }
+
+    let typst_content = format!(
+        r#"#set page(width: auto, height: auto, margin: 1.2cm)
+#set text(size: 36pt)
+#align(center)[
+  ${}$
+]
+"#,
+        expr
+    );
+
+    let typ_file = NamedTempFile::with_suffix(".typ").map_err(|e| e.to_string())?;
+    let png_file = NamedTempFile::with_suffix(".png").map_err(|e| e.to_string())?;
+    fs::write(typ_file.path(), typst_content).map_err(|e| e.to_string())?;
+
+    let output = Command::new("typst")
+        .args([
+            "compile",
+            "--format",
+            "png",
+            typ_file.path().to_str().unwrap(),
+            png_file.path().to_str().unwrap(),
+        ])
+        .output()
+        .map_err(|e| format!("Failed to run typst: {}", e))?;
+
+    if !output.status.success() {
+        let err = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("Typst failed: {}", err));
+    }
+    fs::read(png_file.path()).map_err(|e| e.to_string())
 }
 
 // ====================== PARSER + EVALUATOR ======================
-
 #[derive(Debug)]
 enum Expr {
     Num(BigRational),
@@ -303,14 +874,12 @@ fn process_expression(
         .replace(" ", "");
     let tokens = tokenize(&cleaned)?;
     let (expr, _) = parse_expr(&tokens, 0)?;
-
     let mut step_list = vec![];
     let result = if show_steps {
         evaluate_with_steps(&expr, &mut step_list)?
     } else {
         evaluate(&expr)?
     };
-
     let filtered_steps: Vec<String> = step_list
         .into_iter()
         .filter(|step| {
@@ -320,13 +889,11 @@ fn process_expression(
             }))
         })
         .collect();
-
     let steps_opt = if show_steps && !filtered_steps.is_empty() {
         Some(filtered_steps)
     } else {
         None
     };
-
     let slash_count = cleaned.chars().filter(|&c| c == '/').count();
     let warning = if slash_count >= 3 {
         Some(
@@ -337,10 +904,8 @@ fn process_expression(
     } else {
         None
     };
-
     let expr_latex = to_latex(&expr);
     let result_latex = to_latex_result(&result);
-
     let markdown = format!(
         r#"# Math Expression Result
 **Expression:**
@@ -355,7 +920,6 @@ Exact value: `{}`
 "#,
         expr_latex, expr_latex, result_latex, result
     );
-
     let latex_doc = format!(
         r#"\documentclass[11pt]{{article}}
 \usepackage{{amsmath}}
@@ -372,14 +936,12 @@ Exact value: `{}`
 "#,
         expr_latex, expr_latex, result_latex
     );
-
     let png_bytes = render_to_png(&expr, &result)?;
     let steps_png_opt = if show_steps && steps_opt.is_some() {
         Some(render_steps_to_png(steps_opt.as_ref().unwrap())?)
     } else {
         None
     };
-
     Ok((
         markdown,
         latex_doc,
@@ -636,8 +1198,6 @@ fn to_typst_result(r: &BigRational) -> String {
     if d == &BigInt::from(1) { n.to_string() } else { format!("{}/{}", n, d) }
 }
 
-// ====================== TYPS CLI RENDERING ======================
-
 fn render_to_png(expr: &Expr, result: &BigRational) -> Result<Vec<u8>, String> {
     let expr_str = to_typst(expr);
     let result_str = to_typst_result(result);
@@ -650,11 +1210,9 @@ fn render_to_png(expr: &Expr, result: &BigRational) -> Result<Vec<u8>, String> {
 "#,
         expr_str, result_str
     );
-
     let typ_file = NamedTempFile::with_suffix(".typ").map_err(|e| e.to_string())?;
     let png_file = NamedTempFile::with_suffix(".png").map_err(|e| e.to_string())?;
     fs::write(typ_file.path(), typst_content).map_err(|e| e.to_string())?;
-
     let output = Command::new("typst")
         .args([
             "compile",
@@ -665,7 +1223,6 @@ fn render_to_png(expr: &Expr, result: &BigRational) -> Result<Vec<u8>, String> {
         ])
         .output()
         .map_err(|e| format!("Failed to run typst: {}", e))?;
-
     if !output.status.success() {
         return Err(format!(
             "Typst error: {}",
@@ -692,11 +1249,9 @@ fn render_steps_to_png(display_steps: &[String]) -> Result<Vec<u8>, String> {
             .collect::<Vec<_>>()
             .join(",\n ")
     );
-
     let typ_file = NamedTempFile::with_suffix(".typ").map_err(|e| e.to_string())?;
     let png_file = NamedTempFile::with_suffix(".png").map_err(|e| e.to_string())?;
     fs::write(typ_file.path(), typst_content).map_err(|e| e.to_string())?;
-
     let output = Command::new("typst")
         .args([
             "compile",
@@ -707,7 +1262,6 @@ fn render_steps_to_png(display_steps: &[String]) -> Result<Vec<u8>, String> {
         ])
         .output()
         .map_err(|e| format!("Failed to run typst: {}", e))?;
-
     if !output.status.success() {
         return Err(format!(
             "Typst error: {}",
@@ -721,7 +1275,6 @@ fn render_steps_to_png(display_steps: &[String]) -> Result<Vec<u8>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
     fn evaluate_expression(input: &str) -> Result<BigRational, String> {
         let cleaned = input
             .replace(['[', '{'], "(")
@@ -731,7 +1284,6 @@ mod tests {
         let (expr, _) = parse_expr(&tokens, 0)?;
         evaluate(&expr)
     }
-
     #[test] fn test_implied_mul_2_1_3() { let res = evaluate_expression("2(1/3)").unwrap(); assert_eq!(res, BigRational::new(BigInt::from(2), BigInt::from(3))); }
     #[test] fn test_implied_mul_3_4_5() { let res = evaluate_expression("3(4+5)").unwrap(); assert_eq!(res, BigRational::from_integer(BigInt::from(27))); }
     #[test] fn test_implied_mul_1_2_4() { let res = evaluate_expression("(1+2)4").unwrap(); assert_eq!(res, BigRational::from_integer(BigInt::from(12))); }
@@ -758,7 +1310,6 @@ mod tests {
     #[test] fn test_show_off_neg3_2_5_1_4_3_1_2_7_8() { let res = evaluate_expression("-3(2/5 - 1/4(3 + 1/2)) + 7/8").unwrap(); assert_eq!(res, BigRational::new(BigInt::from(23), BigInt::from(10))); }
     #[test] fn test_new_edge_case() { let res = evaluate_expression("(1/3)/(2/5) + (4/6)*(7/8)/(9/10)").unwrap(); assert_eq!(res, BigRational::new(BigInt::from(40), BigInt::from(27))); }
     #[test] fn test_new_edge_case2() { let res = evaluate_expression("(1/4 + 1/5)/6 * 7/(2/3 - 1/8)").unwrap(); assert_eq!(res, BigRational::new(BigInt::from(63), BigInt::from(65))); }
-
     #[test] fn test_decimals() {
         let res = evaluate_expression("1.5 + 2/3").unwrap();
         assert_eq!(res, BigRational::new(BigInt::from(13), BigInt::from(6)));
@@ -767,7 +1318,6 @@ mod tests {
         let res3 = evaluate_expression(".5 * 2").unwrap();
         assert_eq!(res3, BigRational::from_integer(BigInt::from(1)));
     }
-
     #[test] fn test_edge_1_plus_2_times_3_times_4_plus_5() { let res = evaluate_expression("(1+2)3(4+5)").unwrap(); assert_eq!(res, BigRational::from_integer(BigInt::from(81))); }
     #[test] fn test_edge_1_plus_2_times_3_plus_4_times_5_plus_6() { let res = evaluate_expression("(1+2)(3+4)(5+6)").unwrap(); assert_eq!(res, BigRational::from_integer(BigInt::from(231))); }
     #[test] fn test_edge_1_minus_nested() { let res = evaluate_expression("1 - (2 - (3 - 4))").unwrap(); assert_eq!(res, BigRational::from_integer(BigInt::from(-2))); }
