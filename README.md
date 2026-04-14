@@ -1,7 +1,12 @@
 # rusty-fractions
 Operate on fractions using RUST
 
-<img width="800" height="600" alt="Screenshot_2026-04-13_09-39-09" src="https://github.com/user-attachments/assets/d03db830-3790-4fec-b717-d324948bd83e" />
+![frac](https://github.com/user-attachments/assets/d2c29ee6-c463-4889-873e-77af9be53c17)
+
+
+![cf](https://github.com/user-attachments/assets/e2161bf6-1e9c-42da-85e8-a5e0e2186467)
+
+
 
 ---
 
@@ -11,6 +16,7 @@ Operate on fractions using RUST
 - Full decimal support (1.5, 0.25, .5, etc.)
 - Implied multiplication (2(3+4), (1+2)3(4+5))
 - Left-associative chained divisions (1/2/3/4 = 1/24) with clear warning for 3 or more divisions
+- Continued Fractions
 - Step-by-step calculation with clean rendered PNGs (no duplicate steps)
 - Beautiful math rendering via Typst
 - Export options: final_render.png, steps_render.png, math_output.md, and math_output.tex
