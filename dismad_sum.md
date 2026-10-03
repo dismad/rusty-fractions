@@ -45,6 +45,22 @@ So $\delta(22/7) = 10$.
 
 The product of the diagonal entries is not invariant under the same rewrite: $3 \cdot 7 = 21$, while $3 \cdot 6 \cdot 1 = 18$. Order is not invariant either. $[0; 1, 19]$ and $[0; 19, 1]$ both have dismad sum $20$, and the values are $19/20$ and $1/20$.
 
+## Normal form
+
+The two listings are the same trace at consecutive sizes. The switch expands or reduces the diagonal by one.
+
+$$
+\mathrm{diag}(3, 7) \longleftrightarrow \mathrm{diag}(3, 6, 1)
+$$
+
+is $2 \times 2$ against $3 \times 3$, and both have trace $10$. Reduce while the corner is $1$: delete it and add $1$ to the previous last entry. Stop when the last entry is greater than $1$.
+
+$$
+\mathrm{diag}(3, 6, 1) \longrightarrow \mathrm{diag}(3, 7)
+$$
+
+The short diagonal is the normal form of $22/7$. Two expansions compare equal exactly when their reductions do. The product does not survive the same step: $21$ against $18$. The switch is legal only at the last slot, and only once. Splitting an earlier entry keeps a trace and changes the rational.
+
 ## What it is not
 
 The dismad sum is not the convergent, and it is not the continuant trace.
