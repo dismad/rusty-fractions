@@ -40,6 +40,7 @@ struct App {
     cf_value_input: String,
     cf_coeffs_input: String,
     cf_partial_quotients: Vec<BigInt>,
+    cf_normal: Vec<BigInt>,
     cf_convergents: Vec<(BigInt, BigInt)>,
     cf_result_text: String,
     cf_status: String,
@@ -413,6 +414,50 @@ impl App {
             ui.label("Continued Fraction:");
             let cf_str = self.cf_to_string();
             ui.monospace(&cf_str);
+            let sum = dismad_sum(&self.cf_partial_quotients);
+            let is_normal = self.cf_partial_quotients == self.cf_normal;
+            ui.horizontal(|ui| {
+                ui.label("dismad sum");
+                ui.label(
+                    egui::RichText::new(sum.to_string())
+                        .font(egui::FontId::new(28.0, egui::FontFamily::Monospace))
+                        .strong()
+                        .color(egui::Color32::from_rgb(224, 181, 26)),
+                );
+                ui.add_space(24.0);
+                ui.label("normal form");
+                ui.label(
+                    egui::RichText::new(format_cf(&self.cf_normal))
+                        .font(egui::FontId::new(22.0, egui::FontFamily::Monospace))
+                        .color(if is_normal {
+                            egui::Color32::from_rgb(100, 255, 100)
+                        } else {
+                            egui::Color32::from_rgb(180, 180, 180)
+                        }),
+                );
+                ui.add_space(24.0);
+                ui.label(format!(
+                    "size {}x{}",
+                    self.cf_partial_quotients.len(),
+                    self.cf_partial_quotients.len()
+                ));
+            });
+            ui.horizontal(|ui| {
+                let can_expand = expand_cf(&self.cf_partial_quotients).is_some();
+                let can_reduce = self.cf_partial_quotients != self.cf_normal;
+                if ui
+                    .add_enabled(can_expand, egui::Button::new("Expand to long form"))
+                    .clicked()
+                {
+                    self.apply_cf_listing(ctx, true);
+                }
+                if ui
+                    .add_enabled(can_reduce, egui::Button::new("Reduce to normal form"))
+                    .clicked()
+                {
+                    self.apply_cf_listing(ctx, false);
+                }
+            });
 
             ui.add_space(10.0);
             ui.label("Convergents (nested continued-fraction form):");
@@ -425,14 +470,16 @@ impl App {
                         .max_height(420.0)
                         .show(ui, |ui| {
                             egui::Grid::new("convergents_grid")
-                                .num_columns(3)
+                                .num_columns(4)
                                 .striped(true)
                                 .show(ui, |ui| {
                                     ui.label("n");
                                     ui.label("Continued Fractions (nested)");
                                     ui.label("Simplified Approximations");
+                                    ui.label("running delta");
                                     ui.end_row();
 
+                                    let mut running = BigInt::from(0);
                                     for (i, (h, k)) in self.cf_convergents.iter().enumerate() {
                                         ui.label(i.to_string());
 
@@ -451,6 +498,23 @@ impl App {
                                             egui::RichText::new(value)
                                                 .font(egui::FontId::new(22.0, egui::FontFamily::Monospace))
                                                 .color(egui::Color32::from_rgb(100, 255, 100)),
+                                        );
+
+                                        running += &self.cf_partial_quotients[i];
+                                        let last = i + 1 == self.cf_convergents.len();
+                                        ui.label(
+                                            egui::RichText::new(if last {
+                                                format!("{}  dismad", running)
+                                            } else {
+                                                running.to_string()
+                                            })
+                                            .font(egui::FontId::new(22.0, egui::FontFamily::Monospace))
+                                            .strong()
+                                            .color(if last {
+                                                egui::Color32::from_rgb(224, 181, 26)
+                                            } else {
+                                                egui::Color32::from_rgb(160, 160, 170)
+                                            }),
                                         );
                                         ui.end_row();
                                     }
@@ -508,6 +572,7 @@ impl App {
     fn deconstruct_to_cf(&mut self, ctx: &egui::Context) {
         self.cf_status.clear();
         self.cf_partial_quotients.clear();
+        self.cf_normal.clear();
         self.cf_convergents.clear();
         self.cf_result_text.clear();
         self.cf_texture = None;
@@ -522,6 +587,7 @@ impl App {
             Ok(rat) => {
                 let cf = rational_to_continued_fraction(&rat);
                 let convergents = compute_convergents(&cf);
+                self.cf_normal = reduce_cf(&cf);
                 self.cf_partial_quotients = cf;
                 self.cf_convergents = convergents;
                 self.cf_result_text = rat.to_string();
@@ -538,6 +604,7 @@ impl App {
     fn construct_from_cf(&mut self, ctx: &egui::Context) {
         self.cf_status.clear();
         self.cf_partial_quotients.clear();
+        self.cf_normal.clear();
         self.cf_convergents.clear();
         self.cf_result_text.clear();
         self.cf_texture = None;
@@ -556,6 +623,7 @@ impl App {
                 }
                 let convergents = compute_convergents(&cf);
                 let value = cf_to_rational(&cf);
+                self.cf_normal = reduce_cf(&cf);
                 self.cf_partial_quotients = cf;
                 self.cf_convergents = convergents;
                 self.cf_result_text = value.to_string();
@@ -598,21 +666,39 @@ impl App {
     }
 
     fn cf_to_string(&self) -> String {
-        if self.cf_partial_quotients.is_empty() {
-            return String::new();
+        format_cf(&self.cf_partial_quotients)
+    }
+
+    fn apply_cf_listing(&mut self, ctx: &egui::Context, expand: bool) {
+        let next = if expand {
+            expand_cf(&self.cf_partial_quotients)
+        } else {
+            Some(reduce_cf(&self.cf_partial_quotients))
+        };
+        let Some(cf) = next else {
+            return;
+        };
+        let convergents = compute_convergents(&cf);
+        let value = cf_to_rational(&cf);
+        self.cf_normal = reduce_cf(&cf);
+        self.cf_partial_quotients = cf;
+        self.cf_convergents = convergents;
+        self.cf_result_text = value.to_string();
+        self.cf_status = if expand {
+            "Expanded to long form".to_string()
+        } else {
+            "Reduced to normal form".to_string()
+        };
+        if let Err(e) = self.try_render_nested_cf(ctx) {
+            self.cf_status = format!("Render error: {}", e);
         }
-        let mut s = format!("[{}", self.cf_partial_quotients[0]);
-        for a in &self.cf_partial_quotients[1..] {
-            s.push_str(&format!(";{}", a));
-        }
-        s.push(']');
-        s
     }
 
     fn clear_cf(&mut self) {
         self.cf_value_input.clear();
         self.cf_coeffs_input.clear();
         self.cf_partial_quotients.clear();
+        self.cf_normal.clear();
         self.cf_convergents.clear();
         self.cf_result_text.clear();
         self.cf_status.clear();
@@ -696,11 +782,17 @@ impl App {
         // 2. Save the convergents table as text file
         if !self.cf_partial_quotients.is_empty() {
             let mut text = String::new();
-            text.push_str(&format!("Continued Fraction: {}\n\n", self.cf_to_string()));
+            text.push_str(&format!("Continued Fraction: {}\n", self.cf_to_string()));
+            text.push_str(&format!(
+                "dismad sum: {}\nnormal form: {}\n\n",
+                dismad_sum(&self.cf_partial_quotients),
+                format_cf(&self.cf_normal)
+            ));
             text.push_str("Convergents (nested form):\n");
-            text.push_str("n | Nested Continued Fraction                    | Simplified Value\n");
-            text.push_str("------------------------------------------------------------------\n");
+            text.push_str("n | Nested Continued Fraction                    | Simplified Value | running delta\n");
+            text.push_str("--------------------------------------------------------------------------------\n");
 
+            let mut running = BigInt::from(0);
             for (i, (h, k)) in self.cf_convergents.iter().enumerate() {
                 let nested = self.convergent_nested_string(i);
                 let value = if k.is_zero() {
@@ -708,7 +800,8 @@ impl App {
                 } else {
                     format!("{}/{}", h, k)
                 };
-                text.push_str(&format!("{:1} | {:45} | {}\n", i, nested, value));
+                running += &self.cf_partial_quotients[i];
+                text.push_str(&format!("{:1} | {:45} | {} | {}\n", i, nested, value, running));
             }
 
             let path = cwd.join("cf_convergents.txt");
@@ -785,6 +878,44 @@ fn compute_convergents(cf: &[BigInt]) -> Vec<(BigInt, BigInt)> {
         k_prev1 = k;
     }
     convergents
+}
+
+fn dismad_sum(cf: &[BigInt]) -> BigInt {
+    cf.iter().fold(BigInt::from(0), |s, a| s + a)
+}
+
+fn reduce_cf(cf: &[BigInt]) -> Vec<BigInt> {
+    let mut out = cf.to_vec();
+    while out.len() > 1 && out.last() == Some(&BigInt::from(1)) {
+        out.pop();
+        if let Some(last) = out.last_mut() {
+            *last += 1;
+        }
+    }
+    out
+}
+
+fn expand_cf(cf: &[BigInt]) -> Option<Vec<BigInt>> {
+    let mut out = cf.to_vec();
+    let last = out.last()?.clone();
+    if last <= BigInt::from(1) {
+        return None;
+    }
+    *out.last_mut().unwrap() = last - 1;
+    out.push(BigInt::from(1));
+    Some(out)
+}
+
+fn format_cf(cf: &[BigInt]) -> String {
+    if cf.is_empty() {
+        return String::new();
+    }
+    let mut s = format!("[{}", cf[0]);
+    for a in &cf[1..] {
+        s.push_str(&format!(";{}", a));
+    }
+    s.push(']');
+    s
 }
 
 fn cf_to_rational(cf: &[BigInt]) -> BigRational {
